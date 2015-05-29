@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<request>
+	<jobinstanceid>SK9cohJD4yklcD8dJuZXDA</jobinstanceid>
+	<operator name="DataCleaning" alias="" class="DataCleaning">
+		<parameter name="inputFilePath">/user/xdf/syslog</parameter>
+	</operator>
+
+	<!--训练阶段第一步，获取hive表message数据，清洗后存回hive表 -->
+	<operator name="HiveDataProcessing" alias="" class="HiveDataProcessing">
+		<parameter name="processingOutTable">logs2</parameter><!-- 保存从原始日志文件中提取到的message字段数据，该数据已经经过分词、去重、过滤干扰词 -->
+		<parameter name="processingTabSchema">message string</parameter><!-- 表模式 -->
+	</operator>
+
+	<!-- 训练阶段第二步，在local模式下对上一步生成的数据加上id -->
+	<operator name="AddIDs" alias="" class="AddIDs">
+		<parameter name="addIDOutTable">logs3</parameter><!-- 对上一步得到的message数据加上序号，此步需要单机运行，集群模式的话id会有重复 -->
+		<parameter name="addIDTabSchema">id int,message string</parameter><!-- 表模式 -->
+	</operator>
+
+	<!-- 训练阶段第三步,获取第二步生成的数据，训练后得到（类别，特征）数据，存到hive新表中 -->
+	<operator name="DirectGenerateFeature" alias=""
+		class="DirectGenerateFeature">
+		<parameter name="featureTable">logs4</parameter><!-- 根据以上带序号的message数据，挖掘出的日志类别及特征保存在此表 -->
+		<parameter name="featureTabSchema">label string,feature string,docIds string
+		</parameter><!-- 表模式 -->
+		<parameter name="similarity">0.5</parameter><!-- 生成邻接矩阵时两条日志的公共子序列占本身比例大于该值即视为相似，临接值设为 1 否则为 0 -->
+	</operator>
+
+	<!-- 挖掘阶段第一步，给源表里数据加上类别并按ip分开存到新表里，ip为新表分区列 -->
+	<operator name="AddLabel" alias="" class="AddLabel">
+		<parameter name="labelOutTable">logs5</parameter><!-- 日志加上类别后保存的表 -->
+		<parameter name="labelTabSchema">id int,label string,time string,ip
+			string,message string
+		</parameter><!-- 表模式 -->
+	</operator>
+
+	<!-- 挖掘阶段第二步，把每个ip分区下的日志数据与对应ip的告警数据整合、排序后建立FP-Tree -->
+	<operator name="LogMergeAndMining" alias="" class="LogMergeAndMining">
+		<parameter name="fptreePath">/user/xdf/fpgrowth/</parameter><!--保存生成FP-Tree的目录 -->
+		<parameter name="windowSize">30</parameter><!-- 生成事务实例时指定的窗口大小，单位分钟，即该时间窗口内的数据放在一个事务里 -->
+		<parameter name="stepSize">10</parameter><!-- 窗口向前移动的步长，单位分钟 -->
+		<parameter name="minSupport">0.7</parameter> <!-- 频繁项集的最小支持度 -->
+	</operator>
+	<!-- spark streaming 对日志流数据分类 -->
+	<operator name="LogMatcherFinal" alias="" class="LogMatcherFinal">
+		<parameter name="logMessageField">3</parameter>  <!-- 要处理的日志流数据message列的位置 -->
+		<parameter name="matchRate">0.5</parameter>  <!-- message数据与一个特征数据的公共词量占该特征词总量大于一个匹配率视为二者相似 -->
+		<parameter name="zkquorum">m103:2181/kafka</parameter>  <!-- kafka接口 -->
+		<parameter name="groupID">xdf111</parameter>  <!-- 新用户读取kafka数据需要指定一个特定组ID -->
+		<parameter name="thriftURI">thrift://m103:9083</parameter>
+		<parameter name="topicAndThreads">
+		    <!--  <topic name="hive-wtj-test" threads="40"></topic>-->
+			<topic>hive-wtj-test:40</topic> <!-- 从kafka获取数据时，需要指定topic名字和读取该topic的线程数 -->
+		</parameter>
+		<parameter name="outputDBName">xdf</parameter><!-- 流数据处理后输出到的数据库名 -->
+		<parameter name="outputMatchTable">labelmatch</parameter> <!-- 标记上类别的数据要存入的表 -->
+		<parameter name="outputWarningTable">warningmatch</parameter> <!-- 跟多余一个特征相似的数据要存入的表 -->
+		<parameter name="outputNotagTable">notagmatch</parameter> <!-- 跟所有特征都不相似的数据要存入的表 -->
+	</operator>
+	<!-- 公共参数 -->
+	<datasets>
+		<database name="dbName">xdf</database> <!-- 数据库名 -->
+		<sourcetable name="sourceTable" value="logdata3"> <!-- 普通日志数据表 -->
+			<parameter name="partition">timepartition <='2014-08-14' and timepartition >='2014-07-31'</parameter> <!-- 分区 st=\'1\' -->
+			<parameter name="timeFieldPos">1</parameter> <!-- 时间域位置 -->
+			<parameter name="ipFieldPos">2</parameter>   <!-- IP域位置 -->
+			<parameter name="messageFieldPos">3</parameter> <!-- message域位置 -->
+		</sourcetable>
+		<alarmtable name="alarmTable" value="alarm"> <!-- 告警日志数据表 -->
+			<parameter name="alarmTimeField">0</parameter> <!-- 时间域位置 -->
+			<parameter name="alarmLabelField">1</parameter>   <!-- 类别域位置 -->
+		</alarmtable>
+		<ipset name="ips">  <!-- 日志数据所包含的ip列表，需要按ip对数据进行日志挖掘 -->
+			<row>192.168.8.1</row>
+			<row>192.168.8.2</row>
+			<row>192.168.8.3</row>
+		</ipset>
+	</datasets>
+</request>
+
